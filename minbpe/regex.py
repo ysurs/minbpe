@@ -4,10 +4,9 @@ Minimal (byte-level) Byte Pair Encoding tokenizer.
 Algorithmically follows along the GPT tokenizer:
 https://github.com/openai/gpt-2/blob/master/src/encoder.py
 
-Unlike bpe_basic.py, this file also handles the regex splitting pattern.
-
-But:
-- Does not handle any special tokens.
+Unlike BasicTokenizer:
+- RegexTokenizer handles an optional regex splitting pattern.
+- RegexTokenizer handles optional special tokens.
 """
 
 import regex as re
@@ -22,10 +21,17 @@ GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1
 
 class RegexTokenizer(Tokenizer):
 
-    def __init__(self):
+    def __init__(self, pattern=None):
+        """
+        - pattern: optional string to override the default (GPT-4 split pattern)
+        - special_tokens: str -> int dictionary of special tokens
+          example: {'<|endoftext|>': 100257}
+        """
         super().__init__()
-        self.pattern = GPT4_SPLIT_PATTERN
+        self.pattern = GPT4_SPLIT_PATTERN if pattern is None else pattern
         self.compiled_pattern = re.compile(self.pattern)
+        self.special_tokens = {}
+        self.inverse_special_tokens = {}
 
     def train(self, text, vocab_size, verbose=False):
         assert vocab_size >= 256
@@ -41,18 +47,16 @@ class RegexTokenizer(Tokenizer):
         merges = {} # (int, int) -> int
         vocab = {idx: bytes([idx]) for idx in range(256)} # idx -> bytes
         for i in range(num_merges):
-            # count up the number of times every consecutive pair appears
-            chunk_stats = [get_stats(chunk_ids) for chunk_ids in ids]
-            # combine the pair counts from all chunks by summing them up
+            # count the number of times every consecutive pair appears
             stats = {}
-            for chstat in chunk_stats:
-                for pair, count in chstat.items():
-                    stats[pair] = stats.get(pair, 0) + count
+            for chunk_ids in ids:
+                # passing in stats will update it in place, adding up counts
+                get_stats(chunk_ids, stats)
             # find the pair with the highest count
             pair = max(stats, key=stats.get)
             # mint a new token: assign it the next available id
             idx = 256 + i
-            # replace all occurences of pair in ids with idx
+            # replace all occurrences of pair in ids with idx
             ids = [merge(chunk_ids, pair, idx) for chunk_ids in ids]
             # save the merge
             merges[pair] = idx
@@ -65,9 +69,23 @@ class RegexTokenizer(Tokenizer):
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
 
+    def register_special_tokens(self, special_tokens):
+        # special_tokens is a dictionary of str -> int
+        # example: {"<|endoftext|>": 100257}
+        self.special_tokens = special_tokens
+        self.inverse_special_tokens = {v: k for k, v in special_tokens.items()}
+
     def decode(self, ids):
         # given ids (list of integers), return Python string
-        text_bytes = b"".join(self.vocab[idx] for idx in ids)
+        part_bytes = []
+        for idx in ids:
+            if idx in self.vocab:
+                part_bytes.append(self.vocab[idx])
+            elif idx in self.inverse_special_tokens:
+                part_bytes.append(self.inverse_special_tokens[idx].encode("utf-8"))
+            else:
+                raise ValueError(f"invalid token id: {idx}")
+        text_bytes = b"".join(part_bytes)
         text = text_bytes.decode("utf-8", errors="replace")
         return text
 
@@ -90,7 +108,8 @@ class RegexTokenizer(Tokenizer):
             ids = merge(ids, pair, idx)
         return ids
 
-    def encode(self, text):
+    def encode_ordinary(self, text):
+        """Encoding that ignores any special tokens."""
         # split text into chunks of text by categories defined in regex pattern
         text_chunks = re.findall(self.compiled_pattern, text)
         # all chunks of text are encoded separately, then results are joined
@@ -99,4 +118,47 @@ class RegexTokenizer(Tokenizer):
             chunk_bytes = chunk.encode("utf-8") # raw bytes
             chunk_ids = self._encode_chunk(chunk_bytes)
             ids.extend(chunk_ids)
+        return ids
+
+    def encode(self, text, allowed_special="none_raise"):
+        """
+        Unlike encode_ordinary, this function handles special tokens.
+        allowed_special: can be "all"|"none"|"none_raise" or a custom set of special tokens
+        if none_raise, then an error is raised if any special token is encountered in text
+        this is the default tiktoken behavior right now as well
+        any other behavior is either annoying, or a major footgun
+        """
+        # decode the user desire w.r.t. handling of special tokens
+        special = None
+        if allowed_special == "all":
+            special = self.special_tokens
+        elif allowed_special == "none":
+            special = {}
+        elif allowed_special == "none_raise":
+            special = {}
+            assert all(token not in text for token in self.special_tokens)
+        elif isinstance(allowed_special, set):
+            special = {k: v for k, v in self.special_tokens.items() if k in allowed_special}
+        else:
+            raise ValueError(f"allowed_special={allowed_special} not understood")
+        if not special:
+            # shortcut: if no special tokens, just use the ordinary encoding
+            return self.encode_ordinary(text)
+        # otherwise, we have to be careful with potential special tokens in text
+        # we handle special tokens by splitting the text
+        # based on the occurrence of any exact match with any of the special tokens
+        # we can use re.split for this. note that surrounding the pattern with ()
+        # makes it into a capturing group, so the special tokens will be included
+        special_pattern = "(" + "|".join(re.escape(k) for k in special) + ")"
+        special_chunks = re.split(special_pattern, text)
+        # now all the special characters are separated from the rest of the text
+        # all chunks of text are encoded separately, then results are joined
+        ids = []
+        for part in special_chunks:
+            if part in special:
+                # this is a special token, encode it separately as a special case
+                ids.append(special[part])
+            else:
+                # this is an ordinary sequence, encode it normally
+                ids.extend(self.encode_ordinary(part))
         return ids
