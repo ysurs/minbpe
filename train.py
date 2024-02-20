@@ -8,15 +8,16 @@ from minbpe import BasicTokenizer, RegexTokenizer
 
 # open some text and train a vocab of 512 tokens
 text = open("tests/taylorswift.txt", "r", encoding="utf-8").read()
+print(text)
 
-# create a directory for models so we don't pollute the current directory
-os.makedirs("models", exist_ok=True)
+# # create a directory for models so we don't pollute the current directory
+# os.makedirs("models", exist_ok=True)
 
-for TokenizerClass, name in zip([BasicTokenizer, RegexTokenizer], ["basic", "regex"]):
+# for TokenizerClass, name in zip([BasicTokenizer, RegexTokenizer], ["basic", "regex"]):
 
-    # construct the Tokenizer object and kick off verbose training
-    tokenizer = TokenizerClass()
-    tokenizer.train(text, 512, verbose=True)
-    # writes two files in the models directory: name.model, and name.vocab
-    prefix = os.path.join("models", name)
-    tokenizer.save(prefix)
+#     # construct the Tokenizer object and kick off verbose training
+#     tokenizer = TokenizerClass()
+#     tokenizer.train(text, 512, verbose=True)
+#     # writes two files in the models directory: name.model, and name.vocab
+#     prefix = os.path.join("models", name)
+#     tokenizer.save(prefix)
